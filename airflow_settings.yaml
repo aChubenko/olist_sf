@@ -1,0 +1,6 @@
+# Local-only Airflow objects managed by Astro CLI.
+# Snowflake credentials are intentionally supplied through environment variables.
+airflow:
+  connections: []
+  pools: []
+  variables: []

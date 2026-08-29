@@ -1,0 +1,27 @@
+.env
+.idea/
+.vscode/
+.pytest_cache/
+.astro/ide_settings.yaml
+.astro/worktrees/
+__pycache__/
+*.py[cod]
+
+# Airflow runtime
+logs/*
+!logs/.gitkeep
+config/*
+!config/.gitkeep
+plugins/*
+!plugins/.gitkeep
+
+# Downloaded Olist data
+data/raw/*
+!data/raw/.gitkeep
+data/*.zip
+
+# dbt runtime artifacts
+dbt/logs/
+dbt/target/
+dbt/dbt_packages/
+dbt/.user.yml

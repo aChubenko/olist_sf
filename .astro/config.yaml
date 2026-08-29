@@ -1,0 +1,6 @@
+project:
+  name: olist-medallion
+container:
+  binary: docker
+postgres:
+  port: 15432

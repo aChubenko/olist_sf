@@ -141,6 +141,8 @@ astro dev pytest
 
 Эти же проверки автоматически запускает GitHub Actions для каждого pull request и после слияния в `master`. Workflow использует только фиктивные CI-переменные: локальный `.env` и Snowflake credentials в репозиторий не передаются.
 
+Типичные production-сбои, способы диагностики, меры защиты и checklist перед деплоем собраны в [Production troubleshooting](./docs/production-troubleshooting.md).
+
 Открыть shell scheduler-контейнера и запустить Airflow/dbt-команды внутри локального Astro Runtime:
 
 ```powershell
@@ -180,6 +182,7 @@ dbt/models/gold/        snowflake dimensional model and mart
 dbt/tests/              business data-quality assertions
 tests/                  Astro DAG integrity tests
 .github/workflows/      GitHub Actions: Astro DAG parse and pytest
+docs/                   production troubleshooting and operational checklists
 include/                Astro utility-files directory
 sql/                    example analytical queries
 data/raw/               local landing zone (ignored by git)

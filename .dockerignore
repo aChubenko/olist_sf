@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.idea
+.vscode
+**/__pycache__
+**/*.pyc
+data/raw/*.csv
+dbt/logs
+dbt/target
+dbt/dbt_packages
+logs
+.astro/ide_settings.yaml
+.astro/worktrees

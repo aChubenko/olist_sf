@@ -1,0 +1,76 @@
+version: 2
+
+models:
+  - name: stg_customers
+    description: Deduplicated customers with normalized ZIP and state code.
+    columns:
+      - name: customer_id
+        data_tests: [not_null, unique]
+      - name: customer_unique_id
+        data_tests: [not_null]
+  - name: stg_geolocation
+    description: One representative coordinate and locality per ZIP prefix.
+    columns:
+      - name: zip_code_prefix
+        data_tests: [not_null, unique]
+  - name: stg_order_items
+    description: Typed order item grain.
+    data_tests:
+      - unique:
+          arguments:
+            column_name: "order_id || '-' || order_item_id"
+    columns:
+      - name: order_id
+        data_tests: [not_null]
+      - name: order_item_id
+        data_tests: [not_null]
+      - name: price
+        data_tests: [not_null]
+  - name: stg_order_payments
+    description: Typed payment events at order and payment sequence grain.
+    data_tests:
+      - unique:
+          arguments:
+            column_name: "order_id || '-' || payment_sequential"
+    columns:
+      - name: order_id
+        data_tests: [not_null]
+  - name: stg_order_reviews
+    description: Deduplicated order reviews.
+    data_tests:
+      - unique:
+          arguments:
+            column_name: "review_id || '-' || order_id"
+    columns:
+      - name: order_id
+        data_tests: [not_null]
+      - name: review_score
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5]
+  - name: stg_orders
+    description: Typed order lifecycle timestamps and status.
+    columns:
+      - name: order_id
+        data_tests: [not_null, unique]
+      - name: customer_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_customers')
+                field: customer_id
+  - name: stg_products
+    columns:
+      - name: product_id
+        data_tests: [not_null, unique]
+  - name: stg_sellers
+    columns:
+      - name: seller_id
+        data_tests: [not_null, unique]
+  - name: stg_product_categories
+    columns:
+      - name: category_name
+        data_tests: [not_null, unique]
+

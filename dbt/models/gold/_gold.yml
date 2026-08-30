@@ -1,0 +1,120 @@
+version: 2
+
+models:
+  - name: dim_geography
+    description: Shared geography dimension used by customers and sellers.
+    columns:
+      - name: geography_key
+        data_tests: [not_null, unique]
+  - name: dim_product_category
+    description: Normalized product category outrigger dimension.
+    columns:
+      - name: product_category_key
+        data_tests: [not_null, unique]
+  - name: dim_product
+    description: Product dimension linked to the normalized category dimension.
+    columns:
+      - name: product_key
+        data_tests: [not_null, unique]
+      - name: product_category_key
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_product_category')
+                field: product_category_key
+  - name: dim_customer
+    description: Customer dimension at Olist customer_id grain.
+    columns:
+      - name: customer_key
+        data_tests: [not_null, unique]
+      - name: geography_key
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_geography')
+                field: geography_key
+  - name: dim_seller
+    description: Seller dimension linked to the shared geography dimension.
+    columns:
+      - name: seller_key
+        data_tests: [not_null, unique]
+      - name: geography_key
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_geography')
+                field: geography_key
+  - name: dim_date
+    description: Calendar dimension spanning all relevant Olist order dates.
+    columns:
+      - name: date_key
+        data_tests: [not_null, unique]
+      - name: date_day
+        data_tests: [not_null, unique]
+  - name: fact_orders
+    description: One row per order with item, payment, review, and delivery metrics.
+    columns:
+      - name: order_id
+        data_tests: [not_null, unique]
+      - name: customer_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customer')
+                field: customer_key
+      - name: order_date_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+  - name: fact_order_items
+    description: One row per order item with product, seller, customer, and date keys.
+    data_tests:
+      - unique:
+          arguments:
+            column_name: "order_id || '-' || order_item_id"
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fact_orders')
+                field: order_id
+      - name: product_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_product')
+                field: product_key
+      - name: seller_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_seller')
+                field: seller_key
+      - name: customer_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customer')
+                field: customer_key
+      - name: order_date_key
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+  - name: mart_daily_sales
+    description: Daily business KPIs aggregated from the order fact.
+    columns:
+      - name: date_key
+        data_tests: [not_null, unique]
+

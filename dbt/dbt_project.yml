@@ -1,0 +1,31 @@
+name: olist_medallion
+version: 1.0.0
+config-version: 2
+
+profile: olist_medallion
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - target
+  - dbt_packages
+
+models:
+  olist_medallion:
+    +persist_docs:
+      relation: true
+      columns: true
+    silver:
+      +materialized: table
+      +schema: "{{ env_var('SNOWFLAKE_SILVER_SCHEMA', 'SILVER') }}"
+      +tags: ["silver"]
+    gold:
+      +materialized: table
+      +schema: "{{ env_var('SNOWFLAKE_GOLD_SCHEMA', 'GOLD') }}"
+      +tags: ["gold"]
+

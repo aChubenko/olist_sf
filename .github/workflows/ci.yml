@@ -1,0 +1,74 @@
+name: Astro CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: astro-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Parse DAGs and run tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Reject tracked environment files
+        shell: bash
+        run: |
+          tracked_env_files="$({ git ls-files | grep -E '(^|/)\.env($|\.)' | grep -v -E '(^|/)\.env\.example$'; } || true)"
+          if [[ -n "${tracked_env_files}" ]]; then
+            echo "::error::Environment files must not be committed:"
+            printf '%s\n' "${tracked_env_files}"
+            exit 1
+          fi
+
+      - name: Install Astro CLI
+        uses: astronomer/setup-astro-cli@v0.0.1
+        with:
+          version: "1.40.1"
+
+      - name: Create non-secret CI environment
+        shell: bash
+        run: |
+          cat > .env.ci <<'EOF'
+          OLIST_PROJECT_ROOT=/usr/local/airflow
+          DBT_PROJECT_DIR=/usr/local/airflow/dbt
+          DBT_PROFILES_DIR=/usr/local/airflow/dbt
+          OLIST_SCRIPT_DIR=/usr/local/airflow/scripts
+          OLIST_DATA_DIR=/usr/local/airflow/data/raw
+          SNOWFLAKE_ACCOUNT=ci_account
+          SNOWFLAKE_USER=ci_user
+          SNOWFLAKE_PASSWORD=ci_not_a_real_secret
+          SNOWFLAKE_ROLE=CI_ROLE
+          SNOWFLAKE_WAREHOUSE=CI_WH
+          SNOWFLAKE_DATABASE=CI_DB
+          SNOWFLAKE_BRONZE_SCHEMA=BRONZE
+          SNOWFLAKE_SILVER_SCHEMA=SILVER
+          SNOWFLAKE_GOLD_SCHEMA=GOLD
+          SNOWFLAKE_CREATE_RESOURCES=false
+          DBT_THREADS=2
+          OLIST_DAG_SCHEDULE=
+          EOF
+          chmod 600 .env.ci
+
+      - name: Parse Airflow DAGs
+        run: astro dev parse --env .env.ci
+
+      - name: Run DAG integrity tests
+        run: astro dev pytest --env .env.ci
+
+      - name: Remove CI environment
+        if: always()
+        shell: bash
+        run: rm -f .env.ci

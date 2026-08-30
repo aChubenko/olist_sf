@@ -8,6 +8,14 @@ from pathlib import Path
 
 import pendulum
 from airflow.sdk import dag, task
+from cosmos import (
+    DbtTaskGroup,
+    ExecutionConfig,
+    ProfileConfig,
+    ProjectConfig,
+    RenderConfig,
+)
+from cosmos.constants import ExecutionMode, InvocationMode, LoadMode, TestBehavior
 
 
 AIRFLOW_HOME = Path(os.environ.get("AIRFLOW_HOME", "/opt/airflow"))
@@ -72,10 +80,6 @@ def olist_medallion():
         )
 
     @task()
-    def dbt_debug() -> None:
-        run_command(["dbt", "debug", "--project-dir", str(DBT_PROJECT_DIR)])
-
-    @task()
     def source_freshness() -> None:
         run_command(
             ["dbt", "source", "freshness", "--project-dir", str(DBT_PROJECT_DIR)]
@@ -94,71 +98,38 @@ def olist_medallion():
             ]
         )
 
-    @task()
-    def build_silver() -> None:
-        run_command(
-            [
-                "dbt",
-                "run",
-                "--project-dir",
-                str(DBT_PROJECT_DIR),
-                "--select",
-                "path:models/silver",
-            ]
-        )
-
-    @task()
-    def test_silver() -> None:
-        run_command(
-            [
-                "dbt",
-                "test",
-                "--project-dir",
-                str(DBT_PROJECT_DIR),
-                "--select",
-                "path:models/silver",
-            ]
-        )
-
-    @task()
-    def build_gold() -> None:
-        run_command(
-            [
-                "dbt",
-                "run",
-                "--project-dir",
-                str(DBT_PROJECT_DIR),
-                "--select",
-                "path:models/gold",
-            ]
-        )
-
-    @task()
-    def test_gold() -> None:
-        run_command(
-            [
-                "dbt",
-                "test",
-                "--project-dir",
-                str(DBT_PROJECT_DIR),
-                "--select",
-                "path:models/gold",
-            ]
-        )
+    transformations = DbtTaskGroup(
+        group_id="dbt_transformations",
+        project_config=ProjectConfig(
+            dbt_project_path=DBT_PROJECT_DIR,
+            install_dbt_deps=False,
+        ),
+        profile_config=ProfileConfig(
+            profile_name="olist_medallion",
+            target_name="dev",
+            profiles_yml_filepath=DBT_PROJECT_DIR / "profiles.yml",
+        ),
+        execution_config=ExecutionConfig(
+            execution_mode=ExecutionMode.LOCAL,
+            invocation_mode=InvocationMode.DBT_RUNNER,
+            dbt_executable_path="/usr/local/bin/dbt",
+        ),
+        render_config=RenderConfig(
+            load_method=LoadMode.DBT_LS,
+            invocation_mode=InvocationMode.DBT_RUNNER,
+            select=["path:models/silver", "path:models/gold"],
+            test_behavior=TestBehavior.AFTER_EACH,
+            should_detach_multiple_parents_tests=True,
+        ),
+    )
 
     downloaded = download_source()
     validated = validate_source()
     bronze = load_bronze()
-    debugged = dbt_debug()
     bronze_tested = test_bronze()
     fresh = source_freshness()
-    silver = build_silver()
-    silver_tested = test_silver()
-    gold = build_gold()
-    gold_tested = test_gold()
 
-    downloaded >> validated >> bronze >> debugged >> bronze_tested >> fresh
-    fresh >> silver >> silver_tested >> gold >> gold_tested
+    downloaded >> validated >> bronze >> bronze_tested >> fresh >> transformations
 
 
 olist_medallion()

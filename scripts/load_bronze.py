@@ -1,4 +1,4 @@
-"""Full-refresh Olist CSV files into the Snowflake Bronze layer."""
+"""Atomically full-refresh Olist CSV files into the Snowflake Bronze layer."""
 
 from __future__ import annotations
 
@@ -11,8 +11,12 @@ from pathlib import Path
 
 import snowflake.connector
 
-from olist_schema import DATASETS, OlistDataset
-from validate_olist import validate_directory
+try:
+    from .olist_schema import DATASETS, OlistDataset
+    from .validate_olist import validate_directory
+except ImportError:  # Direct execution: python scripts/load_bronze.py
+    from olist_schema import DATASETS, OlistDataset
+    from validate_olist import validate_directory
 
 
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
@@ -89,6 +93,14 @@ class SnowflakeConfig:
         )
 
 
+@dataclass(frozen=True)
+class PreparedDataset:
+    dataset: OlistDataset
+    target_table: str
+    shadow_table: str
+    loaded_rows: int
+
+
 def connect(config: SnowflakeConfig):
     return snowflake.connector.connect(
         account=config.account,
@@ -150,6 +162,21 @@ def bootstrap(cursor, config: SnowflakeConfig) -> None:
         )
         """
     )
+    cursor.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {config.database}.{config.bronze_schema}.LOAD_RUN_AUDIT (
+          load_id VARCHAR NOT NULL,
+          status VARCHAR NOT NULL,
+          expected_files NUMBER NOT NULL,
+          loaded_files NUMBER NOT NULL,
+          expected_rows NUMBER NOT NULL,
+          loaded_rows NUMBER NOT NULL,
+          started_at TIMESTAMP_TZ NOT NULL DEFAULT CURRENT_TIMESTAMP(),
+          completed_at TIMESTAMP_TZ,
+          error_message VARCHAR
+        )
+        """
+    )
 
 
 def create_raw_table(cursor, config: SnowflakeConfig, dataset: OlistDataset) -> str:
@@ -169,20 +196,73 @@ def create_raw_table(cursor, config: SnowflakeConfig, dataset: OlistDataset) -> 
     return table_name
 
 
-def load_dataset(
+def run_audit_table(config: SnowflakeConfig) -> str:
+    return f"{config.database}.{config.bronze_schema}.LOAD_RUN_AUDIT"
+
+
+def start_run(
+    cursor,
+    config: SnowflakeConfig,
+    load_id: str,
+    expected_files: int,
+    expected_rows: int,
+) -> None:
+    cursor.execute(
+        f"""
+        INSERT INTO {run_audit_table(config)}
+          (load_id, status, expected_files, loaded_files, expected_rows, loaded_rows)
+        VALUES (%s, 'RUNNING', %s, 0, %s, 0)
+        """,
+        (load_id, expected_files, expected_rows),
+    )
+
+
+def mark_run_failed(
+    cursor,
+    config: SnowflakeConfig,
+    load_id: str,
+    prepared: list[PreparedDataset],
+    error: Exception,
+) -> None:
+    error_message = f"{type(error).__name__}: {error}"[:4000]
+    cursor.execute(
+        f"""
+        UPDATE {run_audit_table(config)}
+        SET status = 'FAILED',
+            loaded_files = %s,
+            loaded_rows = %s,
+            completed_at = CURRENT_TIMESTAMP(),
+            error_message = %s
+        WHERE load_id = %s
+        """,
+        (
+            len(prepared),
+            sum(item.loaded_rows for item in prepared),
+            error_message,
+            load_id,
+        ),
+    )
+
+
+def prepare_dataset(
     cursor,
     config: SnowflakeConfig,
     dataset: OlistDataset,
     file_path: Path,
     load_id: str,
-) -> int:
-    table_name = create_raw_table(cursor, config, dataset)
-    stage = f"@{config.database}.{config.bronze_schema}.OLIST_CSV_STAGE/{dataset.table.lower()}"
+    expected_rows: int,
+) -> PreparedDataset:
+    target_table = create_raw_table(cursor, config, dataset)
+    load_suffix = load_id.replace("-", "_").upper()
+    shadow_table = f"{target_table}__LOAD_{load_suffix}"
+    stage = (
+        f"@{config.database}.{config.bronze_schema}.OLIST_CSV_STAGE/"
+        f"{load_id}/{dataset.table.lower()}"
+    )
     file_uri = file_path.resolve().as_uri()
 
-    cursor.execute(f"REMOVE {stage}")
+    cursor.execute(f"CREATE TEMPORARY TABLE {shadow_table} LIKE {target_table}")
     cursor.execute(f"PUT {file_uri} {stage} AUTO_COMPRESS=TRUE OVERWRITE=TRUE")
-    cursor.execute(f"TRUNCATE TABLE {table_name}")
 
     target_columns = ", ".join(
         [identifier("column", column) for column in dataset.columns]
@@ -198,51 +278,150 @@ def load_dataset(
         ]
     )
 
-    cursor.execute(
-        f"""
-        COPY INTO {table_name} ({target_columns})
-        FROM (
-          SELECT {source_columns}
-          FROM {stage}
+    try:
+        cursor.execute(
+            f"""
+            COPY INTO {shadow_table} ({target_columns})
+            FROM (
+              SELECT {source_columns}
+              FROM {stage}
+            )
+            FILE_FORMAT = (
+              FORMAT_NAME = '{config.database}.{config.bronze_schema}.OLIST_CSV_FORMAT'
+            )
+            ON_ERROR = 'ABORT_STATEMENT'
+            FORCE = TRUE
+            """
         )
-        FILE_FORMAT = (
-          FORMAT_NAME = '{config.database}.{config.bronze_schema}.OLIST_CSV_FORMAT'
+        cursor.execute(f"SELECT COUNT(*) FROM {shadow_table}")
+        loaded_rows = int(cursor.fetchone()[0])
+        if loaded_rows != expected_rows:
+            raise ValueError(
+                f"Row-count mismatch for {dataset.filename}: "
+                f"expected {expected_rows}, loaded {loaded_rows}"
+            )
+    finally:
+        try:
+            cursor.execute(f"REMOVE {stage}")
+        except Exception as cleanup_error:
+            print(f"Warning: failed to clean stage path {stage}: {cleanup_error}")
+
+    return PreparedDataset(
+        dataset=dataset,
+        target_table=target_table,
+        shadow_table=shadow_table,
+        loaded_rows=loaded_rows,
+    )
+
+
+def publish_datasets(
+    cursor,
+    config: SnowflakeConfig,
+    load_id: str,
+    prepared: list[PreparedDataset],
+) -> None:
+    cursor.execute("BEGIN TRANSACTION")
+    try:
+        for item in prepared:
+            cursor.execute(
+                f"INSERT OVERWRITE INTO {item.target_table} "
+                f"SELECT * FROM {item.shadow_table}"
+            )
+
+        for item in prepared:
+            cursor.execute(
+                f"""
+                INSERT INTO {config.database}.{config.bronze_schema}.LOAD_AUDIT
+                  (load_id, source_file, target_table, loaded_rows)
+                SELECT %s, %s, %s, %s
+                """,
+                (
+                    load_id,
+                    item.dataset.filename,
+                    item.dataset.table,
+                    item.loaded_rows,
+                ),
+            )
+
+        cursor.execute(
+            f"""
+            UPDATE {run_audit_table(config)}
+            SET status = 'SUCCESS',
+                loaded_files = %s,
+                loaded_rows = %s,
+                completed_at = CURRENT_TIMESTAMP(),
+                error_message = NULL
+            WHERE load_id = %s
+            """,
+            (
+                len(prepared),
+                sum(item.loaded_rows for item in prepared),
+                load_id,
+            ),
         )
-        ON_ERROR = 'ABORT_STATEMENT'
-        FORCE = TRUE
-        """
-    )
-    cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
-    row_count = int(cursor.fetchone()[0])
-    cursor.execute(
-        f"""
-        INSERT INTO {config.database}.{config.bronze_schema}.LOAD_AUDIT
-          (load_id, source_file, target_table, loaded_rows)
-        SELECT %s, %s, %s, %s
-        """,
-        (load_id, dataset.filename, dataset.table, row_count),
-    )
-    return row_count
+        cursor.execute("COMMIT")
+    except Exception:
+        cursor.execute("ROLLBACK")
+        raise
+
+
+def cleanup_shadow_tables(cursor, prepared: list[PreparedDataset]) -> None:
+    for item in prepared:
+        try:
+            cursor.execute(f"DROP TABLE IF EXISTS {item.shadow_table}")
+        except Exception as cleanup_error:
+            print(
+                f"Warning: failed to drop temporary table {item.shadow_table}: "
+                f"{cleanup_error}"
+            )
 
 
 def run(data_dir: Path) -> None:
-    validate_directory(data_dir)
+    expected_row_counts = validate_directory(data_dir)
     config = SnowflakeConfig.from_env()
     load_id = str(uuid.uuid4())
+    prepared: list[PreparedDataset] = []
 
     connection = connect(config)
     try:
         with connection.cursor() as cursor:
             bootstrap(cursor, config)
-            for dataset in DATASETS:
-                row_count = load_dataset(
-                    cursor,
-                    config,
-                    dataset,
-                    data_dir / dataset.filename,
-                    load_id,
+            start_run(
+                cursor,
+                config,
+                load_id,
+                expected_files=len(DATASETS),
+                expected_rows=sum(expected_row_counts.values()),
+            )
+            try:
+                for dataset in DATASETS:
+                    item = prepare_dataset(
+                        cursor,
+                        config,
+                        dataset,
+                        data_dir / dataset.filename,
+                        load_id,
+                        expected_rows=expected_row_counts[dataset.filename],
+                    )
+                    prepared.append(item)
+                    print(
+                        f"Prepared {dataset.filename} -> {item.shadow_table}: "
+                        f"{item.loaded_rows:,} rows"
+                    )
+
+                publish_datasets(cursor, config, load_id, prepared)
+                print(
+                    f"Published load {load_id}: {len(prepared)} files, "
+                    f"{sum(item.loaded_rows for item in prepared):,} rows"
                 )
-                print(f"Loaded {dataset.filename} -> {dataset.table}: {row_count:,} rows")
+            except Exception as error:
+                try:
+                    mark_run_failed(cursor, config, load_id, prepared, error)
+                except Exception as audit_error:
+                    print(f"Warning: failed to record load failure: {audit_error}")
+                raise
+            finally:
+                cleanup_shadow_tables(cursor, prepared)
     finally:
         connection.close()
 

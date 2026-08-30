@@ -1,3 +1,17 @@
+-- Bronze load history and the last atomic publication status
+select
+    load_id,
+    status,
+    expected_files,
+    loaded_files,
+    expected_rows,
+    loaded_rows,
+    started_at,
+    completed_at,
+    error_message
+from OLIST_DWH.BRONZE.LOAD_RUN_AUDIT
+order by started_at desc;
+
 -- Daily sales overview
 select
     date_day,
@@ -40,4 +54,3 @@ left join OLIST_DWH.GOLD.DIM_GEOGRAPHY as geography
     on seller.geography_key = geography.geography_key
 group by geography.state_code, geography.city
 order by gross_item_value desc;
-

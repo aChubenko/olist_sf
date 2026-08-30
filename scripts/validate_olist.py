@@ -7,7 +7,10 @@ import csv
 import os
 from pathlib import Path
 
-from olist_schema import DATASETS
+try:
+    from .olist_schema import DATASETS
+except ImportError:  # Direct execution: python scripts/validate_olist.py
+    from olist_schema import DATASETS
 
 
 def validate_directory(data_dir: Path) -> dict[str, int]:

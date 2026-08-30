@@ -23,7 +23,7 @@ flowchart LR
 
 1. Скачивает публичный архив Olist или использует уже существующие CSV.
 2. Проверяет наличие девяти файлов, заголовки и непустые данные.
-3. Делает идемпотентный full refresh Bronze через `PUT` и `COPY INTO`.
+3. Загружает CSV во временные Bronze-таблицы, сверяет row counts и атомарно публикует все девять таблиц одной транзакцией.
 4. Проверяет Bronze source tests и freshness источников.
 5. Astronomer Cosmos разворачивает 18 dbt-моделей Silver/Gold и их тесты в отдельные Airflow-задачи.
 6. Выполняет модели параллельно по dbt dependency graph и отдельно показывает relationship-тесты с несколькими родителями.
@@ -101,7 +101,7 @@ Astro CLI собирает образ из `Dockerfile` на Astro Runtime `3.3-
 - `USAGE` на существующие warehouse и database;
 - возможность создавать/использовать схемы `BRONZE`, `SILVER`, `GOLD`;
 - создание stage, file format и tables в этих схемах;
-- `SELECT`, `INSERT`, `TRUNCATE` и `DELETE/CREATE OR REPLACE` для объектов проекта.
+- `SELECT`, `INSERT`, `DELETE` и `CREATE OR REPLACE` для объектов проекта.
 
 Проект использует отдельного service user `OLIST_SERVICE`, роль `OLIST_PIPELINE_ROLE` и PAT с ограничением роли. Для production дополнительно настройте network policy, secrets backend и ротацию PAT либо key-pair authentication.
 
@@ -115,7 +115,11 @@ Cosmos cache отключён для одинакового поведения �
 
 ### Bronze
 
-Таблицы `RAW_*` повторяют CSV один к одному. Бизнес-поля остаются `VARCHAR`, а загрузчик добавляет `_LOAD_ID`, `_SOURCE_FILE`, `_SOURCE_ROW_NUMBER`, `_LOADED_AT`. Таблица `LOAD_AUDIT` хранит число загруженных строк по каждому файлу.
+Таблицы `RAW_*` повторяют CSV один к одному. Бизнес-поля остаются `VARCHAR`, а загрузчик добавляет `_LOAD_ID`, `_SOURCE_FILE`, `_SOURCE_ROW_NUMBER`, `_LOADED_AT`.
+
+Загрузчик сначала выполняет `COPY INTO` во временные таблицы и сравнивает количество строк с локальными CSV. Только после подготовки всех девяти файлов он открывает явную транзакцию и выполняет `INSERT OVERWRITE` для всех целевых таблиц. Ошибка приводит к `ROLLBACK`, поэтому потребители не видят частично обновлённый Bronze.
+
+`LOAD_AUDIT` хранит число строк по каждому опубликованному файлу. `LOAD_RUN_AUDIT` хранит состояние всего запуска (`RUNNING`, `SUCCESS`, `FAILED`), ожидаемое и фактическое количество файлов/строк, время выполнения и текст ошибки.
 
 ### Silver
 
@@ -180,7 +184,7 @@ scripts/                download, validation, Snowflake Bronze loader
 dbt/models/silver/      cleaned and typed medallion layer
 dbt/models/gold/        snowflake dimensional model and mart
 dbt/tests/              business data-quality assertions
-tests/                  Astro DAG integrity tests
+tests/                  Astro DAG integrity and atomic Bronze loader tests
 .github/workflows/      GitHub Actions: Astro DAG parse and pytest
 docs/                   production troubleshooting and operational checklists
 include/                Astro utility-files directory
